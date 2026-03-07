@@ -35,7 +35,7 @@ class DataArray(np.ndarray):
     def __array_finalize__(self, obj):
         if obj is None: return
 
-    def __setitem__(self, key, value):
+    def __setitem__tmp(self, key, value):  # Fixme Could not succeed to auto-extend
         # 规范化 key 用于计算形状
         norm_key = self._normalize_key(key)
         value_arr = np.asarray(value)
@@ -206,7 +206,7 @@ class DataBackend(QObject):
     def __init__(self, initial_data: Optional[np.ndarray] = None) -> None:
         super().__init__()
         if initial_data is None:
-            initial_data = np.zeros((10, 10), dtype=np.float64)
+            initial_data = np.zeros((500, 10), dtype=np.float64)
 
         arr = DataArray(
             initial_data.shape,

@@ -7,10 +7,11 @@ from __future__ import annotations
 import ast
 from typing import Optional
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal, QEvent
 from PySide6.QtGui import (
     QAction, QColor, QBrush, QTextCursor, QKeyEvent,
-    QTextCharFormat, QSyntaxHighlighter, QFontMetrics
+    QTextCharFormat, QSyntaxHighlighter, QFontMetrics,
+    QShortcut, QKeySequence
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -452,6 +453,7 @@ class MainWindow(QMainWindow):
         self.table_view = SelectionTableView()
         self.table_view.setFrameShape(QFrame.NoFrame)
         self.table_view.horizontalHeader().hide()
+        self.table_view.setCornerButtonEnabled(False)
         self.table_view.setModel(self.table_model)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -510,6 +512,19 @@ class MainWindow(QMainWindow):
 
         self.status = QStatusBar()
         self.setStatusBar(self.status)
+
+        # zoom in/out by keyboard
+        self._geometry_scaling = False
+        self.table_view.viewport().installEventFilter(self)
+
+        self.zoom_in_shortcut = QShortcut(QKeySequence("Ctrl+="), self)
+        self.zoom_out_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
+        self.zoom_in_shortcut.activated.connect(lambda: self.set_table_font_size(self.table_view.font().pointSize() + 1))
+        self.zoom_out_shortcut.activated.connect(lambda: self.set_table_font_size(self.table_view.font().pointSize() - 1))
+        self.zoom_in_shortcut2 = QShortcut(QKeySequence.ZoomIn, self)
+        self.zoom_out_shortcut2 = QShortcut(QKeySequence.ZoomOut, self)
+        self.zoom_in_shortcut2.activated.connect(lambda: self.set_table_font_size(self.table_view.font().pointSize() + 1))
+        self.zoom_out_shortcut2.activated.connect(lambda: self.set_table_font_size(self.table_view.font().pointSize() - 1))
 
         self._setup_connections()
         self._setup_menu()
@@ -577,7 +592,9 @@ class MainWindow(QMainWindow):
         aligns with the left part of the data area (i.e., the row header).
         """
         self.title_corner.setFixedWidth(self.table_view.verticalHeader().width())
-        self.title_corner.setFixedHeight(self.title_view.height())
+        h = self.title_view.rowHeight(0) + self.title_view.frameWidth() * 2 if self.title_model.rowCount() > 0 else self.title_view.height()
+        self.title_corner.setFixedHeight(h)
+        self.title_bar.setFixedHeight(self.title_view.height())
 
     def _on_table_viewport_resized(self, old_size, new_size) -> None:
         """
@@ -653,46 +670,6 @@ class MainWindow(QMainWindow):
         self.table_view.clearSelection()
         self.backend.clear_mouse_selection()
 
-    def _scale_table_geometry_(self, sx: float, sy: float) -> None:
-        """
-        scale cell size wrt the whole window size.
-        Args:
-            sx:
-            sy:
-
-        Returns:
-
-        """
-        sx = max(0.5, min(2.0, sx))
-        sy = max(0.5, min(2.0, sy))
-
-        cols = self.table_model.columnCount()
-        rows = self.table_model.rowCount()
-
-        # 列宽按横向比例缩放
-        for c in range(cols):
-            old_w = self.table_view.columnWidth(c)
-            new_w = max(40, round(old_w * sx))
-            self.table_view.setColumnWidth(c, new_w)
-            self.title_view.setColumnWidth(c, new_w)
-
-        # 数据行高按纵向比例缩放
-        for r in range(rows):
-            old_h = self.table_view.rowHeight(r)
-            new_h = max(18, round(old_h * sy))
-            self.table_view.setRowHeight(r, new_h)
-
-        # 标题行高度也按纵向比例缩放
-        if self.title_model.rowCount() > 0:
-            old_title_h = self.title_view.rowHeight(0)
-            new_title_h = max(20, round(old_title_h * sy))
-            self.title_view.setRowHeight(0, new_title_h)
-            self.title_view.setFixedHeight(
-                new_title_h + self.title_view.frameWidth() * 2
-            )
-
-        self._sync_title_corner_geometry()
-
     def _scale_table_geometry(self, sx: float, sy: float) -> None:
         """
         Scale cell sizes (column widths and row heights) based on the given
@@ -731,7 +708,31 @@ class MainWindow(QMainWindow):
         # Ensure title row and data area left alignment
         self.title_view.resizeRowsToContents()
         self._sync_title_corner_geometry()
+        self.title_bar.updateGeometry()
 
+    def eventFilter(self, obj, event):
+        if obj is self.table_view.viewport():
+            if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
+                delta = event.angleDelta().y()
+                step = 1 if delta > 0 else -1
+                self.set_table_font_size(self.table_view.font().pointSize() + step)
+                return True
+
+            if event.type() == QEvent.Resize and not self._geometry_scaling:
+                old_size = event.oldSize()
+                new_size = event.size()
+
+                if old_size.width() > 0 and old_size.height() > 0:
+                    sx = new_size.width() / old_size.width()
+                    sy = new_size.height() / old_size.height()
+
+                    self._geometry_scaling = True
+                    try:
+                        self._scale_table_geometry(sx, sy)
+                    finally:
+                        self._geometry_scaling = False
+
+        return super().eventFilter(obj, event)
 
     #def resizeEvent(self, event) -> None:
     #    """
@@ -755,30 +756,30 @@ class MainWindow(QMainWindow):
     #    # Update the last viewport size for next resize event
     #    self._last_viewport_size = self.table_view.viewport().size()
 
-    def wheelEvent(self, event) -> None:
-        """捕获鼠标滚轮事件，支持 Ctrl + 滚轮来调整表格大小"""
-        if event.modifiers() == Qt.ControlModifier:
-            delta = event.angleDelta().y()
-            if delta > 0:
-                current = self.table_view.font().pointSize()
-                self.set_table_font_size(current + 1)  # 放大字体
-            else:
-                current = self.table_view.font().pointSize()
-                self.set_table_font_size(current - 1)  # 缩小字体
-
-        super().wheelEvent(event)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        """监听 Ctrl + + 和 Ctrl + - 来调整字号"""
-        if event.modifiers() == Qt.ControlModifier:
-            if event.key() == Qt.Key_Equal:  # Ctrl + "+"
-                _current_size = self.table_view.font().pointSize()
-                self.set_table_font_size(_current_size + 1)  # 放大字体
-            elif event.key() == Qt.Key_Minus:  # Ctrl + "-"
-                _current_size = self.table_view.font().pointSize()
-                self.set_table_font_size(_current_size - 1)  # 缩小字体
-        else:
-            super().keyPressEvent(event)  # 其他事件继续传递
+    #def wheelEvent(self, event) -> None:
+    #    """捕获鼠标滚轮事件，支持 Ctrl + 滚轮来调整表格大小"""
+    #    if event.modifiers() == Qt.ControlModifier:
+    #        delta = event.angleDelta().y()
+    #        if delta > 0:
+    #            current = self.table_view.font().pointSize()
+    #            self.set_table_font_size(current + 1)  # 放大字体
+    #        else:
+    #            current = self.table_view.font().pointSize()
+    #            self.set_table_font_size(current - 1)  # 缩小字体
+#
+    #    super().wheelEvent(event)
+#
+    #def keyPressEvent(self, event: QKeyEvent) -> None:
+    #    """监听 Ctrl + + 和 Ctrl + - 来调整字号"""
+    #    if event.modifiers() == Qt.ControlModifier:
+    #        if event.key() == Qt.Key_Equal:  # Ctrl + "+"
+    #            _current_size = self.table_view.font().pointSize()
+    #            self.set_table_font_size(_current_size + 1)  # 放大字体
+    #        elif event.key() == Qt.Key_Minus:  # Ctrl + "-"
+    #            _current_size = self.table_view.font().pointSize()
+    #            self.set_table_font_size(_current_size - 1)  # 缩小字体
+    #    else:
+    #        super().keyPressEvent(event)  # 其他事件继续传递
 
     def set_table_font_size(self, size: int) -> None:
         """

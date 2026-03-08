@@ -9,7 +9,7 @@ from typing import Optional
 import re
 import os
 
-from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal, QEvent
+from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal, QEvent, QSignalBlocker
 from PySide6.QtGui import (
     QAction, QColor, QBrush, QTextCursor, QKeyEvent,
     QTextCharFormat, QSyntaxHighlighter, QFontMetrics,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QApplication,
     QFileDialog,
+    QMenu,
 )
 
 import numpy as np
@@ -255,27 +256,25 @@ class ConsolePanel(QWidget):
 
         layout = QVBoxLayout(self)
 
-        top = QHBoxLayout()
-        self.title = QLabel("Console")
-        self.run_button = QPushButton("执行")
-        self.clear_after_submit = QCheckBox("提交后清空")
-        self.clear_output_button = QPushButton("清空输出")
         # 新增的工具栏区域
         top = QHBoxLayout()
         self.title = QLabel("Console")
         self.run_button = QPushButton("执行")
         self.clear_after_submit = QCheckBox("提交后清空输入")
+        self.clear_after_submit.setChecked(True)  # default: true
+        self.clear_input_button = QPushButton("清空输入")
         self.clear_output_button = QPushButton("清空输出")
 
         # 添加调整字号的 QComboBox 控件
         self.font_size_combobox = QComboBox()
         self.font_size_combobox.addItems(["8", "10", "12", "14", "16", "18", "20", "22", "24", "26", "28", "32", "36", "40"])
-        self.font_size_combobox.setCurrentText("16")  # Default font size: 20
+        self.font_size_combobox.setCurrentText("16")  # Default font size: 16
 
         top.addWidget(self.title)
         top.addStretch()
         top.addWidget(self.run_button)
         top.addWidget(self.clear_after_submit)
+        top.addWidget(self.clear_input_button)
         top.addWidget(self.clear_output_button)
         top.addWidget(QLabel("字号: "))
         top.addWidget(self.font_size_combobox)  # Font config
@@ -285,8 +284,7 @@ class ConsolePanel(QWidget):
         self.output_edit.setReadOnly(True)
         self.adjust_font_size("16")
         self.input_edit.setPlaceholderText(
-            "支持实时预览 data[...] 选区\n"
-            "Shift+Enter 提交；表格中选区按 Space 写入 data[...] \n\n"
+            "Shift+Enter 提交执行表达式；在表格中选中区域后，按 Space 写入所选区域的表达式 data[...]。\n\n"
             "示例：\n"
             "data[1:4, [0, 2, 4]] + data[:, [1, 3]]\n"
             "data[8:10, 6:8] = np.ones((2, 2))\n"
@@ -303,6 +301,7 @@ class ConsolePanel(QWidget):
         layout.addWidget(self.output_edit, 3)
 
         self.run_button.clicked.connect(self._submit)
+        self.clear_input_button.clicked.connect(self.clear_requested.emit)
         self.clear_output_button.clicked.connect(self.clear_requested.emit)
         self.input_edit.textChanged.connect(self._emit_live_text)
         self.input_edit.submitted.connect(self._submit)
@@ -335,17 +334,26 @@ class ConsolePanel(QWidget):
             self.output_edit.insertPlainText("\n")
         self.output_edit.moveCursor(QTextCursor.End)
 
+    def append_input(self, text: str) -> None:
+        """
+        append `text` to `self.input_edit.toPlainText()`, and then reset focues to the console
+        Args:
+            text:
+
+        Returns:
+
+        """
+        self.input_edit.setFocus(Qt.OtherFocusReason)
+        cursor = self.input_edit.textCursor()
+        cursor.insertText(text)
+        self.input_edit.setTextCursor(cursor)
+        self.input_edit.ensureCursorVisible()
+
     def clear_output(self) -> None:
         self.output_edit.clear()
 
-    def append_input(self, text: str) -> None:
-        self.input_edit.insertPlainText(text)
-
-        #self.input_edit.setPlainText(text)
-        #self.input_edit.setFocus()
-        #cursor = self.input_edit.textCursor()
-        #cursor.movePosition(QTextCursor.End)
-        #self.input_edit.setTextCursor(cursor)
+    def clear_input(self) -> None:
+        self.input_edit.clear()
 
 
 class RibbonGroup(QFrame):
@@ -375,6 +383,7 @@ class RibbonToolbar(QWidget):
     """
     font_size_changed = Signal(int)
     dtype_selected = Signal(str)
+    cell_size_changed = Signal(int, int)  # col_width, row_height
 
     def __init__(self, dtype_names: list[str], parent=None) -> None:
         super().__init__(parent)
@@ -419,9 +428,31 @@ class RibbonToolbar(QWidget):
 
         layout.addWidget(self.dtype_group)
 
-        # 预留空组
-        self.edit_group = RibbonGroup("编辑")
         self.view_group = RibbonGroup("视图")
+        self.cell_width_box = QComboBox()
+        self.cell_width_box.setEditable(True)
+        self.cell_width_box.addItems(["40", "60", "80", "100", "120", "160", "200"])
+        self.cell_width_box.setCurrentText("100")
+        self.cell_width_box.setMaximumWidth(72)
+
+        self.cell_height_box = QComboBox()
+        self.cell_height_box.setEditable(True)
+        self.cell_height_box.addItems(["18", "22", "26", "30", "36", "44", "52"])
+        self.cell_height_box.setCurrentText("30")
+        self.cell_height_box.setMaximumWidth(72)
+
+        self.view_group.content_layout.addWidget(QLabel("列宽"))
+        self.view_group.content_layout.addWidget(self.cell_width_box)
+        self.view_group.content_layout.addWidget(QLabel("行高"))
+        self.view_group.content_layout.addWidget(self.cell_height_box)
+
+        self.cell_width_box.lineEdit().editingFinished.connect(self._emit_cell_size)
+        self.cell_height_box.lineEdit().editingFinished.connect(self._emit_cell_size)
+        self.cell_width_box.currentTextChanged.connect(lambda _: self._emit_cell_size())
+        self.cell_height_box.currentTextChanged.connect(lambda _: self._emit_cell_size())
+
+        # 预留空组
+        self.edit_group = RibbonGroup("编辑(未实装)")
 
         layout.addWidget(self.font_group)
         layout.addWidget(self.edit_group)
@@ -452,6 +483,40 @@ class RibbonToolbar(QWidget):
         self.font_size_box.setCurrentText(str(size))
         self.font_size_changed.emit(size)
 
+    def _current_cell_width(self) -> int:
+        """
+        get the current width of each cell
+        Returns:
+
+        """
+        try:
+            return max(20, min(400, int(self.cell_width_box.currentText().strip())))
+        except Exception:
+            return 100
+
+    def _current_cell_height(self) -> int:
+        """
+        get the current height of each cell
+        Returns:
+
+        """
+        try:
+            return max(16, min(200, int(self.cell_height_box.currentText().strip())))
+        except Exception:
+            return 30
+
+    def _emit_cell_size(self) -> None:
+        """
+
+        Returns:
+
+        """
+        w = self._current_cell_width()
+        h = self._current_cell_height()
+        self.cell_width_box.setCurrentText(str(w))
+        self.cell_height_box.setCurrentText(str(h))
+        self.cell_size_changed.emit(w, h)
+
     def set_dtype(self, dtype_name: str) -> None:
         """
         Options to set the dtype.
@@ -472,6 +537,12 @@ class RibbonToolbar(QWidget):
 
     def set_current_file(self, name: str) -> None:
         self.file_label.setText(name)
+
+    def set_cell_size(self, col_width: int, row_height: int) -> None:
+        b1 = QSignalBlocker(self.cell_width_box)
+        b2 = QSignalBlocker(self.cell_height_box)
+        self.cell_width_box.setCurrentText(str(col_width))
+        self.cell_height_box.setCurrentText(str(row_height))
 
 
 class TitleRowModel(QAbstractTableModel):
@@ -553,6 +624,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PySide + NumPy Table Console")
         self.resize(1100, 760)
 
+        # sizes information
+        self._baseline_font_size = 12
+        self._font_size_now = 12
+        self._cell_col_width = 100
+        self._cell_row_height = 30
+
         # Main Framework
         self.table_model = NumpyTableModel(backend)
         self.table_view = SelectionTableView()
@@ -563,8 +640,6 @@ class MainWindow(QMainWindow):
             | QAbstractItemView.SelectedClicked
         )
         self.table_view.paste_requested.connect(self._paste_into_table)
-        #self.table_view.horizontalHeader().hide()
-        #self.table_view.setCornerButtonEnabled(False)
         self.table_view.setModel(self.table_model)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -578,8 +653,10 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.console)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
+        # ribbons
         self.ribbon = RibbonToolbar(list(self.backend.ALLOWED_TYPES.keys()))
         self.ribbon.set_dtype(self.backend.current_dtype_name)
+        #self.ribbon.set_cell_size(self.table_view.columnWidth(0), self.table_view.rowHeight(0) if self.table_model.rowCount() > 0 else 30)
 
         # The part of the title line
         self.title_model = TitleRowModel(backend)
@@ -600,6 +677,8 @@ class MainWindow(QMainWindow):
         self.title_view.setShowGrid(True)
         self.title_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.title_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Adding menu when click right key
+        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         #self._last_viewport_size = self.table_view.viewport().size()  # record the size before resizeEvent triggered.
 
         self.title_corner = QWidget()
@@ -631,16 +710,13 @@ class MainWindow(QMainWindow):
 
         self.zoom_in_shortcut = QShortcut(QKeySequence("Ctrl+="), self)
         self.zoom_out_shortcut = QShortcut(QKeySequence("Ctrl+-"), self)
-        self.zoom_in_shortcut.activated.connect(lambda: self.set_table_font_size(self.table_view.font().pointSize() + 1))
-        self.zoom_out_shortcut.activated.connect(lambda: self.set_table_font_size(self.table_view.font().pointSize() - 1))
-        self.zoom_in_shortcut2 = QShortcut(QKeySequence.ZoomIn, self)
-        self.zoom_out_shortcut2 = QShortcut(QKeySequence.ZoomOut, self)
-        self.zoom_in_shortcut2.activated.connect(lambda: self.set_table_font_size(self.table_view.font().pointSize() + 1))
-        self.zoom_out_shortcut2.activated.connect(lambda: self.set_table_font_size(self.table_view.font().pointSize() - 1))
+        self.zoom_in_shortcut.activated.connect(lambda: self.zoom_cell_size(1))
+        self.zoom_out_shortcut.activated.connect(lambda: self.zoom_cell_size(-1))
 
         self._setup_connections()
         self._setup_menu()
         self.ribbon.set_current_file(self.current_file_name)
+        self._apply_view_metrics()
         self._sync_title_view_geometry()
         self._sync_title_corner_geometry()
         self.update_status()
@@ -739,6 +815,7 @@ class MainWindow(QMainWindow):
 
         self.table_view.space_pressed.connect(self._write_selection_to_console)
         self.table_view.copy_requested.connect(self._copy_from_table)
+        self.table_view.customContextMenuRequested.connect(self._show_table_context_menu)
 
         self.table_view.horizontalScrollBar().valueChanged.connect(
             self.title_view.horizontalScrollBar().setValue
@@ -760,7 +837,11 @@ class MainWindow(QMainWindow):
 
         self._geometry_scaling = False
         self.table_view.viewport_resized.connect(self._on_table_viewport_resized)
+        # set cell size
+        self.ribbon.cell_size_changed.connect(self.set_cell_size)
 
+
+    # menu looks
     def _setup_menu(self) -> None:
         file_menu = self.menuBar().addMenu("文件")
 
@@ -784,6 +865,153 @@ class MainWindow(QMainWindow):
         help_action = QAction("说明", self)
         help_action.triggered.connect(self.show_help)
         help_menu.addAction(help_action)
+
+    def set_cell_size(self, col_width: int, row_height: int) -> None:
+        """
+        Change cell size by Toolbar set
+        Args:
+            col_width:
+            row_height:
+
+        Returns:
+
+        """
+        self._cell_col_width = max(8, min(400, int(col_width)))
+        self._cell_row_height = max(8, min(200, int(row_height)))
+        self._apply_view_metrics()
+
+    def _selected_rows_cols(self) -> tuple[list[int], list[int]]:
+        """
+        Get the selected row and column indices.
+        Returns:
+
+        """
+        indexes = self.table_view.selectionModel().selectedIndexes()
+        if indexes:
+            rows = sorted({idx.row() for idx in indexes})
+            cols = sorted({idx.column() for idx in indexes})
+            return rows, cols
+
+        current = self.table_view.currentIndex()
+        if current.isValid():
+            return [current.row()], [current.column()]
+
+        return [], []
+
+    def _delete_row_exact(self, row: int) -> None:
+        """
+        Only delete one row from the table indexed by row index.
+        Args:
+            row:
+
+        Returns:
+
+        """
+        rows, _ = self.backend.shape
+        if rows <= 1:
+            self.show_warning("至少保留一行")
+            return
+
+        if row < 0 or row >= rows:
+            return
+
+        if row > 0:
+            self.backend.delr(row - 1, 1, '>')
+        else:
+            self.backend.delr(1, 1, '<')
+
+    def _delete_col_exact(self, col: int) -> None:
+        """
+        Only delete one column from the table indexed by column index.
+        Args:
+            col:
+
+        Returns:
+
+        """
+        _, cols = self.backend.shape
+        if cols <= 1:
+            self.show_warning("至少保留一列")
+            return
+
+        if col < 0 or col >= cols:
+            return
+
+        if col > 0:
+            self.backend.delc(col - 1, 1, '>')
+        else:
+            self.backend.delc(1, 1, '<')
+
+    def _insert_row_below_selection(self) -> None:
+        rows, _ = self._selected_rows_cols()
+        if not rows:
+            return
+        self.backend.addr(max(rows), 1, '>')
+
+    def _insert_col_right_selection(self) -> None:
+        _, cols = self._selected_rows_cols()
+        if not cols:
+            return
+        self.backend.addc(max(cols), 1, '>')
+
+    def _delete_selected_rows(self) -> None:
+        rows, _ = self._selected_rows_cols()
+        if not rows:
+            return
+
+        for r in sorted(rows, reverse=True):
+            self._delete_row_exact(r)
+
+    def _delete_selected_cols(self) -> None:
+        _, cols = self._selected_rows_cols()
+        if not cols:
+            return
+
+        for c in sorted(cols, reverse=True):
+            self._delete_col_exact(c)
+
+    def zoom_cell_size(self, step: int) -> None:
+        """
+        Change cell size by Zoom out/in
+        Args:
+            step:
+
+        Returns:
+
+        """
+        factor = 1.1 if step > 0 else (1 / 1.1)
+        self._cell_col_width = max(8, min(400, round(self._cell_col_width * factor)))
+        self._cell_row_height = max(8, min(200, round(self._cell_row_height * factor)))
+        self._apply_view_metrics()
+
+    def _apply_view_metrics(self) -> None:
+        font = self.table_view.font()
+        font.setPointSize(self._font_size_now)
+        self.table_view.setFont(font)
+        self.title_view.setFont(font)
+
+        fm = QFontMetrics(font)
+        min_row_h = max(8, int(fm.height() * 1.1))
+        min_title_h = max(10, int(fm.height() * 1.2))
+        min_col_w = max(16, int(fm.horizontalAdvance("0") * 1.6))
+
+        col_width = max(min_col_w, int(self._cell_col_width))
+        row_height = max(min_row_h, int(self._cell_row_height))
+
+        for c in range(self.table_model.columnCount()):
+            self.table_view.setColumnWidth(c, col_width)
+            self.title_view.setColumnWidth(c, col_width)
+
+        for r in range(self.table_model.rowCount()):
+            self.table_view.setRowHeight(r, row_height)
+
+        if self.title_model.rowCount() > 0:
+            title_h = max(min_title_h, row_height)
+            self.title_view.setRowHeight(0, title_h)
+            self.title_view.setFixedHeight(title_h + self.title_view.frameWidth() * 2)
+
+        self._sync_title_corner_geometry()
+        self.ribbon.set_cell_size(col_width, row_height)
 
     def dragEnterEvent(self, event) -> None:
         """
@@ -874,15 +1102,77 @@ class MainWindow(QMainWindow):
     def show_help(self) -> None:
         QMessageBox.information(
             self,
-            "说明",
-            "data[...] 的字体颜色与表格高亮颜色对应。\n"
-            "表格中选区按空格，可把矩形选区写入 console。\n"
-            "NumPy 现在需要显式写为 np.xxx。\n"
-            "支持 delr/delc 作为 addr/addc 的逆操作。"
+            "使用说明",
+            ">> 本程序包含数据表、控制台（console）和输出面板三个部分 <<\n\n"
+            "1. 数据列表主要仅用于可视化和选择数据，支持区域复制粘贴和双击修改单个值。\n\n"
+            "2. 主要计算和操作部分在控制台中进行，变量`data`指向数据列表中的数据，可作为numpy的数组对象被使用。"
+            "控制台支持输入所有 Python 3.12、NumPy 2.4.2 和 Matplotlib 2.10.8 的语法和指令，可自由编程。其中，\n"
+            "    * NumPy的指令以 `np.` 开头（如`np.sum(data)`，对整个data的数据求和），\n"
+            "    * Matplotlib的指令以 `plt.` 开头（如`plt.matshow(data[:5, :5]); plt.show()`，展示整个data前5行5列数据的热图），\n"
+            "    * Python的原生指令无前缀（如`print(len(data))`，打印data的行数）。\n\n"
+            "3. 输出、警告和报错信息打印在输出面板。对单行命令输出面板直接显示结果，多行命令则必须手动print相应变量才能显示结果。\n\n"
+            "4. 区域选择方法\n"
+            "    在表格中选中区域后按空格，可将矩形选区写入控制台中。\n"
+            "    data[...] 的字体颜色与表格高亮颜色对应。\n\n"
+            "本程序还有以下特有函数：\n"
+            "    addr(self, i: int, size: int, direct: Literal['>', '<'] = '>') -> None, "
+            "向第`i`行（从0开始计数）的上方（direct='<'）/下方（direct='>'，默认值）添加`size`行新行，初始以0填充。\n"
+            "    addc(self, i: int, size: int, direct: Literal['>', '<'] = '>') -> None, "
+            "向第`i`列（从0开始计数）的左侧（direct='<'）/右侧（direct='>'，默认值）添加`size`列新列，初始以0填充。\n"
+            "    delr(self, i: int, size: int, direct: Literal['>', '<'] = '>') -> None, "
+            "向第`i`行（从0开始计数）的上方（direct='<'）/下方（direct='>'）删除`size`行。\n"
+            "    delc(self, i: int, size: int, direct: Literal['>', '<'] = '>') -> None, `delr`的列版本。"
         )
 
     def show_warning(self, text: str) -> None:
         self.console.append_output(f"[warning] {text}")
+
+    def _show_table_context_menu(self, pos) -> None:
+        """
+        Show the menu
+        Args:
+            pos:
+
+        Returns:
+
+        """
+        rows, cols = self._selected_rows_cols()  # get the selected rows/cols
+
+        menu = QMenu(self)
+
+        act_insert_row = menu.addAction("插入行")
+        act_insert_col = menu.addAction("插入列")
+
+        menu.addSeparator()
+
+        act_delete_rows = menu.addAction("删除整行")
+        act_delete_cols = menu.addAction("删除整列")
+
+        menu.addSeparator()
+
+        # 预留项
+        act_reserved_1 = menu.addAction("更多编辑功能（预留）")
+        act_reserved_1.setEnabled(False)
+        act_reserved_2 = menu.addAction("格式功能（预留）")
+        act_reserved_2.setEnabled(False)
+
+        # deactivate options if no valide zone selected.
+        has_row = bool(rows)
+        has_col = bool(cols)
+        act_insert_row.setEnabled(has_row)
+        act_insert_col.setEnabled(has_col)
+        act_delete_rows.setEnabled(has_row)
+        act_delete_cols.setEnabled(has_col)
+
+        action = menu.exec(self.table_view.viewport().mapToGlobal(pos))
+        if action is act_insert_row:
+            self._insert_row_below_selection()
+        elif action is act_insert_col:
+            self._insert_col_right_selection()
+        elif action is act_delete_rows:
+            self._delete_selected_rows()
+        elif action is act_delete_cols:
+            self._delete_selected_cols()
 
     def update_status(self) -> None:
         rows, cols = self.backend.shape
@@ -1032,10 +1322,10 @@ class MainWindow(QMainWindow):
             return
 
         expr = f"data[{rs}:{re}, {cs}:{ce}]"
-        self.console.append_input(expr)
 
         self.table_view.clearSelection()
         self.backend.clear_mouse_selection()
+        self.console.append_input(expr)
 
     def _scale_table_geometry(self, sx: float, sy: float) -> None:
         """
@@ -1082,121 +1372,28 @@ class MainWindow(QMainWindow):
             if event.type() == QEvent.Wheel and (event.modifiers() & Qt.ControlModifier):
                 delta = event.angleDelta().y()
                 step = 1 if delta > 0 else -1
-                self.set_table_font_size(self.table_view.font().pointSize() + step)
+                self.zoom_cell_size(step)
                 return True
 
-            if event.type() == QEvent.Resize and not self._geometry_scaling:
-                old_size = event.oldSize()
-                new_size = event.size()
-
-                if old_size.width() > 0 and old_size.height() > 0:
-                    sx = new_size.width() / old_size.width()
-                    sy = new_size.height() / old_size.height()
-
-                    self._geometry_scaling = True
-                    try:
-                        self._scale_table_geometry(sx, sy)
-                    finally:
-                        self._geometry_scaling = False
+            #if event.type() == QEvent.Resize and not self._geometry_scaling:
+            #    old_size = event.oldSize()
+            #    new_size = event.size()
+#
+            #    if old_size.width() > 0 and old_size.height() > 0:
+            #        sx = new_size.width() / old_size.width()
+            #        sy = new_size.height() / old_size.height()
+#
+            #        self._geometry_scaling = True
+            #        try:
+            #            self._scale_table_geometry(sx, sy)
+            #        finally:
+            #            self._geometry_scaling = False
 
         return super().eventFilter(obj, event)
 
-    #def resizeEvent(self, event) -> None:
-    #    """
-    #    Event triggered when the window is resized. This will scale the table
-    #    and title row proportionally.
-    #    """
-    #    super().resizeEvent(event)
-#
-    #    # Get the new size of the table's viewport
-    #    new_size = self.table_view.viewport().size()
-    #    old_size = self._last_viewport_size
-#
-    #    if old_size.width() > 0 and old_size.height() > 0:
-    #        # Calculate scaling factors for width and height based on previous size
-    #        sx = new_size.width() / old_size.width()
-    #        sy = new_size.height() / old_size.height()
-#
-    #        # Apply scaling to table and title row
-    #        self._scale_table_geometry(sx, sy)
-#
-    #    # Update the last viewport size for next resize event
-    #    self._last_viewport_size = self.table_view.viewport().size()
-
-    #def wheelEvent(self, event) -> None:
-    #    """捕获鼠标滚轮事件，支持 Ctrl + 滚轮来调整表格大小"""
-    #    if event.modifiers() == Qt.ControlModifier:
-    #        delta = event.angleDelta().y()
-    #        if delta > 0:
-    #            current = self.table_view.font().pointSize()
-    #            self.set_table_font_size(current + 1)  # 放大字体
-    #        else:
-    #            current = self.table_view.font().pointSize()
-    #            self.set_table_font_size(current - 1)  # 缩小字体
-#
-    #    super().wheelEvent(event)
-#
-    #def keyPressEvent(self, event: QKeyEvent) -> None:
-    #    """监听 Ctrl + + 和 Ctrl + - 来调整字号"""
-    #    if event.modifiers() == Qt.ControlModifier:
-    #        if event.key() == Qt.Key_Equal:  # Ctrl + "+"
-    #            _current_size = self.table_view.font().pointSize()
-    #            self.set_table_font_size(_current_size + 1)  # 放大字体
-    #        elif event.key() == Qt.Key_Minus:  # Ctrl + "-"
-    #            _current_size = self.table_view.font().pointSize()
-    #            self.set_table_font_size(_current_size - 1)  # 缩小字体
-    #    else:
-    #        super().keyPressEvent(event)  # 其他事件继续传递
-
     def set_table_font_size(self, size: int) -> None:
-        """
-        Set the font size and the corresponding cell size synchronously.
-        Args:
-            size:
-
-        Returns:
-
-        """
-        size = max(6, min(72, int(size)))
-
-        old_size = max(6, self.table_view.font().pointSize())
-        ratio = size / old_size
-
-        font = self.table_view.font()
-        font.setPointSize(size)
-        self.table_view.setFont(font)
-        self.title_view.setFont(font)
-
-        fm = QFontMetrics(font)
-
-        min_row_h = int(fm.height() * 1.75)
-        min_title_h = int(fm.height() * 1.9)
-        min_col_w = max(
-            int(fm.horizontalAdvance("0000.000") + 18),
-            int(fm.horizontalAdvance("标题 00") + 24),
-        )
-
-        # 数据区行高按比例缩放
-        for row in range(self.table_model.rowCount()):
-            old_h = self.table_view.rowHeight(row)
-            new_h = max(min_row_h, round(old_h * ratio))
-            self.table_view.setRowHeight(row, new_h)
-
-        # 标题行高度单独设置
-        old_title_h = self.title_view.rowHeight(0) if self.title_model.rowCount() > 0 else min_title_h
-        self.title_view.setRowHeight(0, max(min_title_h, round(old_title_h * ratio)))
-
-        # 列宽按比例缩放，并保证最小宽度
-        for col in range(self.table_model.columnCount()):
-            old_w = self.table_view.columnWidth(col)
-            new_w = max(min_col_w, round(old_w * ratio))
-            self.table_view.setColumnWidth(col, new_w)
-            self.title_view.setColumnWidth(col, new_w)
-
-        self.title_view.setFixedHeight(
-            self.title_view.rowHeight(0) + self.title_view.frameWidth() * 2
-        )
-        self._sync_title_corner_geometry()
+        self._font_size_now = max(6, min(72, int(size)))
+        self._apply_view_metrics()
 
     def _on_status_selection_changed(self, rs: int, re: int, cs: int, ce: int) -> None:
         self.update_status()

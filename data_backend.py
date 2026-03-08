@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Any
+from typing import Iterable, Optional, Any, Literal
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
@@ -425,12 +425,13 @@ class DataBackend(QObject):
         self._data = new_data
         self.data_changed.emit()
 
-    def addr(self, i: int, size: int) -> None:
+    def addr(self, i: int, size: int, direct: Literal['>', '<'] = '>') -> None:
         """
         Add rows starting at row i with size `size`.
         Args:
             i:
             size:
+            direct: the adding direction. > is for inserting at the right, and < is for inserting at the left
 
         Returns:
 
@@ -438,9 +439,19 @@ class DataBackend(QObject):
         if size <= 0:
             return
         rows, cols = self.shape
-        if i < -1 or i >= rows:
-            raise IndexError("行插入位置越界")
-        insert_at = i + 1
+        # manage negative index
+        if i < 0:
+            i = rows + i
+        elif i >= rows:
+            raise IndexError(f"行插入位置越界. 最大为: {rows}")
+        # direction of < and >
+        if direct == '>':
+            insert_at = i + 1
+        elif direct == '<':
+            insert_at = i
+        else:
+            raise ValueError(f'Invalid direction: {direct}. It must be < or >.')
+
         extra = np.zeros((size, cols), dtype=self._data.dtype)
         self._data = np.vstack([
             self._data[:insert_at, :],
@@ -449,7 +460,7 @@ class DataBackend(QObject):
         ])
         self.data_changed.emit()
 
-    def addc(self, i: int, size: int) -> None:
+    def addc(self, i: int, size: int, direct: Literal['>', '<'] = '>') -> None:
         """
         Add columns starting at column i with size `size`.
         Args:
@@ -462,9 +473,19 @@ class DataBackend(QObject):
         if size <= 0:
             return
         rows, cols = self.shape
-        if i < -1 or i >= cols:
-            raise IndexError("列插入位置越界")
-        insert_at = i + 1
+        # manage negative index
+        if i < 0:
+            i = cols + i
+        elif i >= cols:
+            raise IndexError(f"行插入位置越界. 最大为: {cols}")
+        # direction of < and >
+        if direct == '>':
+            insert_at = i + 1
+        elif direct == '<':
+            insert_at = i
+        else:
+            raise ValueError(f'Invalid direction: {direct}. It must be < or >.')
+
         extra = np.zeros((rows, size), dtype=self._data.dtype)
         self._data = np.hstack([
             self._data[:, :insert_at],
@@ -473,7 +494,7 @@ class DataBackend(QObject):
         ])
         self.data_changed.emit()
 
-    def delr(self, i: int, size: int) -> None:
+    def delr(self, i: int, size: int, direct: Literal['>', '<'] = '>') -> None:
         """
         Delete rows starting at row i with size `size`.
         Args:
@@ -486,10 +507,21 @@ class DataBackend(QObject):
         if size <= 0:
             return
         rows, _ = self.shape
-        if i < -1 or i >= rows:
-            raise IndexError("行删除位置越界")
-        start = i + 1
-        end = start + size
+        # manage negative index
+        if i < 0:
+            i = rows + i
+        elif i >= rows:
+            raise IndexError(f"行删除位置越界. 最大为: {rows}")
+        # direction of < and >
+        if direct == '>':
+            start = i + 1
+            end = start + size
+        elif direct == '<':
+            start = i - size
+            end = i
+        else:
+            raise ValueError(f'Invalid direction: {direct}. It must be < or >.')
+
         if start >= rows:
             return
         end = min(end, rows)
@@ -499,7 +531,7 @@ class DataBackend(QObject):
         ])
         self.data_changed.emit()
 
-    def delc(self, i: int, size: int) -> None:
+    def delc(self, i: int, size: int, direct: Literal['>', '<'] = '>') -> None:
         """
         Delete columns starting at column i with size `size`.
         Args:
@@ -512,10 +544,21 @@ class DataBackend(QObject):
         if size <= 0:
             return
         _, cols = self.shape
-        if i < -1 or i >= cols:
-            raise IndexError("列删除位置越界")
-        start = i + 1
-        end = start + size
+        # manage negative index
+        if i < 0:
+            i = cols + i
+        elif i >= cols:
+            raise IndexError(f"列删除位置越界. 最大为: {cols}")
+        # direction of < and >
+        if direct == '>':
+            start = i + 1
+            end = start + size
+        elif direct == '<':
+            start = i - size
+            end = i
+        else:
+            raise ValueError(f'Invalid direction: {direct}. It must be < or >.')
+
         if start >= cols:
             return
         end = min(end, cols)

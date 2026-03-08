@@ -21,6 +21,7 @@ def main() -> int:
         lambda text: console_backend.preview_selection_from_code(text, emit_warning=False)
     )
     window.console.clear_requested.connect(window.console.clear_output)
+    window.console.clear_requested.connect(window.console.clear_input)
 
     window.show()
     return app.exec()

@@ -7,6 +7,33 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 
+FLOAT_ARRAY_FORMAT = {
+    'max_line_width': 1024,
+    'precision': 8,
+    'separator': '  ',
+    'sign': ' ',
+    'floatmode': 'fixed',
+    'threshold': 21_4748_3647,
+    'formatter': {'float_kind': lambda x: f'{x:0< 16.8f}', 'int_kind': lambda x: f'{x:> 16d}'}
+}
+
+INT_ARRAY_FORMAT = {
+    'max_line_width': 1024,
+    'separator': '  ',
+    'sign': ' ',
+    'threshold': 21_4748_3647,
+    'formatter': {'int_kind': lambda x: f'{x:> 16d}'}
+}
+
+STRING_ARRAY_FORMAT = {
+    'max_line_width': 1024,
+    'separator': '  ',
+    'sign': ' ',
+    'threshold': 21_4748_3647,
+    'formatter': {'str_kind': lambda x: f'{x}'}
+}
+
+
 @dataclass
 class RectSelection:
     row_start: int
@@ -28,7 +55,7 @@ class RectSelection:
 
 
 class DataArray(np.ndarray):
-    def __new__(cls, shape, dtype=float, buffer=None, offset=0, strides=None, order=None):
+    def __new__(cls, shape, dtype=np.float64, buffer=None, offset=0, strides=None, order=None):
         obj = np.ndarray.__new__(cls, shape, dtype, buffer, offset, strides, order)
         return obj
 
@@ -198,6 +225,7 @@ class DataArray(np.ndarray):
 
 class DataBackend(QObject):
     data_changed = Signal()
+    dtype_changed = Signal(str)
     mouse_selection_changed = Signal(object)
     preview_selections_changed = Signal(object)
     status_selection_changed = Signal(int, int, int, int)
@@ -224,6 +252,28 @@ class DataBackend(QObject):
         self._status_rect = RectSelection(0, 1, 0, 1)
         self._mouse_cells: set[tuple[int, int]] = set()
         self._preview_groups: list[set[tuple[int, int]]] = []
+        self._data_type_now = 'float64'
+        self._py_type = float  # record the type of python obj
+        self._np_type = np.float64  # record the type of numpy.ndarray
+        # here is the allowed types of the table. in the value tuple, the first is the converter/type of python build-in obj
+        # and the second is the dtype of numpy.ndarray class.
+        self.ALLOWED_TYPES = {
+            'float64': (float, np.float64),
+            'float32': (float, np.float32),
+            'int8': (int, np.int8),
+            'int16': (int, np.int16),
+            'int32': (int, np.int32),
+            'int64': (int, np.int64),
+            'uint8': (int, np.uint8),
+            'uint16': (int, np.uint16),
+            'uint32': (int, np.uint32),
+            'uint64': (int, np.uint64),
+            'int': (int, np.int64),
+            'float': (float, np.float32),
+            'double': (float, np.float64),
+            'bool': (bool, np.bool_),
+            'object': (lambda x: x, object),
+        }
 
     @property
     def data(self) -> np.ndarray:
@@ -236,11 +286,16 @@ class DataBackend(QObject):
         if arr.ndim != 2:
             raise ValueError("当前仅支持二维 ndarray")
         self._data = arr
+        self._sync_dtype_trackers_from_array()
         self.data_changed.emit()
 
     @property
     def shape(self) -> tuple[int, int]:
         return self._data.shape
+
+    @property
+    def current_dtype_name(self) -> str:
+        return self._data_type_now
 
     def current_status_rect(self) -> RectSelection:
         return self._status_rect
@@ -290,15 +345,75 @@ class DataBackend(QObject):
         self.preview_selections_changed.emit([])
 
     def load_csv(self, path: str) -> None:
-        arr = np.loadtxt(path, delimiter=",", dtype=float)
+        """
+        load saved csv file
+        Args:
+            path:
+
+        Returns:
+
+        """
+        with open(path, 'r') as f:
+            _raw_data = f.readlines()
+        if _raw_data[0].startswith('#'):
+            _start_ptr = 1
+        else:
+            _start_ptr = 0
+
+        _data = [_.replace(',', ' ').strip().split() for _ in _raw_data[_start_ptr:]]
+        arr = np.asarray(_data, dtype=self._np_type)
         if arr.ndim == 1:
             arr = arr.reshape(1, -1)
+        elif arr.ndim != 2:
+            raise RuntimeError(f'Failed to read file {path}: Invalid array shape {arr.shape}.')
         self.data = arr
 
-    def save_csv(self, path: str) -> None:
-        np.savetxt(path, self._data, delimiter=",", fmt="%.6g")
+    def save_csv(self, path: str, title: None|list|str = None) -> None:
+        """
+        save data to a csv file.
+        Args:
+            path:
+            title:
+
+        Returns:
+
+        """
+        # parse data
+        if self._data_type_now.startswith(('f', 'd'), ):
+            formatter = FLOAT_ARRAY_FORMAT
+        elif self._data_type_now.startswith(('i', 'u'), ):
+            formatter = INT_ARRAY_FORMAT
+        else:
+            formatter = STRING_ARRAY_FORMAT
+        arr_string = np.array2string(self._data, **formatter).replace('[', ' ').replace(']', ' ')
+        # parse title
+        if title is None:
+            with open(path, "w") as f:
+                f.write(arr_string)
+        elif isinstance(title, str):
+            if not title.startswith('#'):
+                title = '#' + title
+            with open(path, "w") as f:
+                f.write(title)
+                f.write(arr_string)
+        elif isinstance(title, list):
+            with open(path, "w") as f:
+                f.write("#" + ",".join(title) + '\n')
+                f.write(arr_string)
+        else:
+            raise TypeError(f'Invalid title type: {type(title)}')
+
 
     def ensure_shape(self, min_rows: int, min_cols: int) -> None:
+        """
+        To automatically extend the data shape if given row & column number are larger than them of current shape.
+        Args:
+            min_rows:
+            min_cols:
+
+        Returns:
+
+        """
         rows, cols = self.shape
         new_rows = max(rows, min_rows)
         new_cols = max(cols, min_cols)
@@ -311,6 +426,15 @@ class DataBackend(QObject):
         self.data_changed.emit()
 
     def addr(self, i: int, size: int) -> None:
+        """
+        Add rows starting at row i with size `size`.
+        Args:
+            i:
+            size:
+
+        Returns:
+
+        """
         if size <= 0:
             return
         rows, cols = self.shape
@@ -326,6 +450,15 @@ class DataBackend(QObject):
         self.data_changed.emit()
 
     def addc(self, i: int, size: int) -> None:
+        """
+        Add columns starting at column i with size `size`.
+        Args:
+            i:
+            size:
+
+        Returns:
+
+        """
         if size <= 0:
             return
         rows, cols = self.shape
@@ -341,6 +474,15 @@ class DataBackend(QObject):
         self.data_changed.emit()
 
     def delr(self, i: int, size: int) -> None:
+        """
+        Delete rows starting at row i with size `size`.
+        Args:
+            i:
+            size:
+
+        Returns:
+
+        """
         if size <= 0:
             return
         rows, _ = self.shape
@@ -358,6 +500,15 @@ class DataBackend(QObject):
         self.data_changed.emit()
 
     def delc(self, i: int, size: int) -> None:
+        """
+        Delete columns starting at column i with size `size`.
+        Args:
+            i:
+            size:
+
+        Returns:
+
+        """
         if size <= 0:
             return
         _, cols = self.shape
@@ -374,11 +525,129 @@ class DataBackend(QObject):
         ])
         self.data_changed.emit()
 
+    def change_types(self, dtype):
+        """
+        Change data type to the given `dtype` which must be in `self.ALLOWED_TYPES`.
+        Args:
+            dtype:
+
+        Returns:
+
+        """
+        if dtype not in self.ALLOWED_TYPES:
+            raise ValueError(f'Invalid data type: {dtype}.')
+        self._data_type_now = dtype
+        self._py_type, self._np_type = self.ALLOWED_TYPES[dtype]
+        self._data = self._data.astype(self._np_type)
+        self._sync_dtype_trackers_from_array()
+        self.data_changed.emit()
+
     def set_data_with_auto_expand(self, index: Any, value: Any) -> None:
         target_rows, target_cols = self._infer_required_shape_for_assignment(index)
         if target_rows is not None and target_cols is not None:
             self.ensure_shape(target_rows, target_cols)
         self._data[index] = value
+        self.data_changed.emit()
+
+    def set_value(self, row: int, col: int, value: Any) -> None:
+        """
+        Set a single value of a cell at (row, col).
+        Args:
+            row:
+            col:
+            value:
+
+        Returns:
+
+        """
+        self.ensure_shape(row + 1, col + 1)
+        self._data[row, col] = self._py_type(value)
+        self.data_changed.emit()
+
+    def set_block_at(self, row: int, col: int, values) -> None:
+        """
+        Set blocked values started from (row, col), and automatically overwrite the following zone in the shape of `values`.
+        Args:
+            row:
+            col:
+            values:
+
+        Returns:
+
+        """
+        arr = np.asarray(values, dtype=self._np_type)
+        if arr.ndim == 0:
+            arr = arr.reshape(1, 1)
+        elif arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+
+        h, w = arr.shape
+        self.ensure_shape(row + h, col + w)
+        self._data[row:row + h, col:col + w] = arr
+        self.data_changed.emit()
+
+    def set_block_to_region(
+            self,
+            row0: int,
+            row1: int,
+            col0: int,
+            col1: int,
+            values
+    ) -> None:
+        """
+        Set the values into the region of (row0:row1, col0:col1), requiring the shape of `values` matching (row1 - row0, col1 - col0).
+        Args:
+            row0:
+            row1:
+            col0:
+            col1:
+            values:
+
+        Returns:
+
+        """
+        # data convert and at least 2d
+        arr = np.asarray(values, dtype=self._np_type)
+        if arr.ndim == 0:
+            arr = arr.reshape(1, 1)
+        elif arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+
+        target_h = row1 - row0
+        target_w = col1 - col0
+
+        if target_h <= 0 or target_w <= 0:
+            raise ValueError("目标区域为空")
+
+        # 单值允许填充整个区域
+        if arr.shape == (1, 1):
+            self.ensure_shape(row1, col1)
+            self._data[row0:row1, col0:col1] = arr.item()
+            self.data_changed.emit()
+            return
+
+        # 非单值必须严格匹配
+        if arr.shape != (target_h, target_w):
+            raise ValueError(
+                f"粘贴数据形状 {arr.shape} 与选区形状 {(target_h, target_w)} 不匹配"
+            )
+
+        self.ensure_shape(row1, col1)
+        self._data[row0:row1, col0:col1] = arr
+        self.data_changed.emit()
+
+    def fill_block(self, cells: set[tuple[int, int]], value: Any) -> None:
+        """
+        Fill a single `value` to the range specified by `cells`.
+        Args:
+            cells:
+            value:
+
+        Returns:
+
+        """
+        for r, c in cells:
+            self._data[r, c] = self._py_type(value)
         self.data_changed.emit()
 
     def _infer_required_shape_for_assignment(
@@ -444,3 +713,23 @@ class DataBackend(QObject):
         if full == cells:
             return RectSelection(rs, re, cs, ce)
         return None
+
+    def _sync_dtype_trackers_from_array(self) -> None:
+        """
+        synchronize if array dtype was changed.
+        Returns:
+
+        """
+        dt = np.dtype(self._data.dtype)
+        key = "object" if dt == np.dtype(object) else dt.name
+
+        if key in self.ALLOWED_TYPES:
+            self._data_type_now = key
+            self._py_type, self._np_type = self.ALLOWED_TYPES[key]
+        else:
+            # 允许显示未知 dtype，但不把它加入下拉选项
+            self._data_type_now = key
+            self._py_type = lambda x: x
+            self._np_type = dt.type
+
+        self.dtype_changed.emit(self._data_type_now)

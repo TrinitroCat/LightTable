@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import ast
 from typing import Optional
+import re
+import os
 
 from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex, Signal, QEvent
 from PySide6.QtGui import (
@@ -29,7 +31,9 @@ from PySide6.QtWidgets import (
     QWidget,
     QCheckBox,
     QComboBox,
-    QFrame
+    QFrame,
+    QApplication,
+    QFileDialog,
 )
 
 import numpy as np
@@ -86,7 +90,12 @@ class ConsoleHighlighter(QSyntaxHighlighter):
 
 
 class SelectionTableView(QTableView):
+    """
+    To show the selection zone on the table.
+    """
     space_pressed = Signal()
+    copy_requested = Signal()  # ctrl+c
+    paste_requested = Signal()  # ctrl+v
     viewport_resized = Signal(object, object)  # old_size, new_size
 
     def resizeEvent(self, event) -> None:
@@ -102,10 +111,24 @@ class SelectionTableView(QTableView):
             event.accept()
             self.space_pressed.emit()
             return
+
+        if event.matches(QKeySequence.Paste):
+            event.accept()
+            self.paste_requested.emit()
+            return
+
+        if event.matches(QKeySequence.Copy):
+            event.accept()
+            self.copy_requested.emit()
+            return
+
         super().keyPressEvent(event)
 
 
 class NumpyTableModel(QAbstractTableModel):
+    """
+    To show the numpy array as a QTableView.
+    """
     def __init__(self, backend: DataBackend) -> None:
         super().__init__()
         self.backend = backend
@@ -192,6 +215,20 @@ class NumpyTableModel(QAbstractTableModel):
         if role != Qt.DisplayRole:
             return None
         return f"C{section}" if orientation == Qt.Horizontal else f"R{section}"
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.NoItemFlags
+        return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable
+
+    def setData(self, index, value, role=Qt.EditRole):
+        if not index.isValid() or role != Qt.EditRole:
+            return False
+        try:
+            self.backend.set_value(index.row(), index.column(), value)
+            return True
+        except Exception:
+            return False
 
 
 class ConsoleInput(QPlainTextEdit):
@@ -337,13 +374,21 @@ class RibbonToolbar(QWidget):
     just like MS Office-style
     """
     font_size_changed = Signal(int)
+    dtype_selected = Signal(str)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, dtype_names: list[str], parent=None) -> None:
         super().__init__(parent)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(8)
+
+        # Title
+        self.file_group = RibbonGroup("文件")
+        self.file_label = QLabel("Untitled1.csv")
+        self.file_group.content_layout.addWidget(QLabel("当前:"))
+        self.file_group.content_layout.addWidget(self.file_label)
+        layout.addWidget(self.file_group)
 
         # 字号组
         self.font_group = RibbonGroup("字体")
@@ -359,6 +404,21 @@ class RibbonToolbar(QWidget):
         self.font_group.content_layout.addWidget(self.font_size_box)
         self.font_group.content_layout.addWidget(self.font_inc_btn)
 
+        # Change dtype
+        self.dtype_group = RibbonGroup("数据类型")
+        self.dtype_label_caption = QLabel("当前:")
+        self.dtype_label = QLabel("float64")
+        self.dtype_box = QComboBox()
+        self.dtype_box.setEditable(False)
+        self.dtype_box.addItems(dtype_names)
+        self.dtype_box.setCurrentText("float64")
+
+        self.dtype_group.content_layout.addWidget(self.dtype_label_caption)
+        self.dtype_group.content_layout.addWidget(self.dtype_label)
+        self.dtype_group.content_layout.addWidget(self.dtype_box)
+
+        layout.addWidget(self.dtype_group)
+
         # 预留空组
         self.edit_group = RibbonGroup("编辑")
         self.view_group = RibbonGroup("视图")
@@ -368,10 +428,13 @@ class RibbonToolbar(QWidget):
         layout.addWidget(self.view_group)
         layout.addStretch()
 
+        # set connections
         self.font_dec_btn.clicked.connect(lambda: self._emit_relative(-1))
         self.font_inc_btn.clicked.connect(lambda: self._emit_relative(1))
         self.font_size_box.lineEdit().editingFinished.connect(self._emit_absolute)
         self.font_size_box.currentTextChanged.connect(lambda _: self._emit_absolute())
+
+        self.dtype_box.currentTextChanged.connect(self.dtype_selected.emit)
 
     def _current_size(self) -> int:
         try:
@@ -388,6 +451,27 @@ class RibbonToolbar(QWidget):
         size = max(6, min(72, self._current_size() + step))
         self.font_size_box.setCurrentText(str(size))
         self.font_size_changed.emit(size)
+
+    def set_dtype(self, dtype_name: str) -> None:
+        """
+        Options to set the dtype.
+        Args:
+            dtype_name:
+
+        Returns:
+
+        """
+        self.dtype_label.setText(dtype_name)
+
+        from PySide6.QtCore import QSignalBlocker
+        blocker = QSignalBlocker(self.dtype_box)
+
+        idx = self.dtype_box.findText(dtype_name)
+        if idx >= 0:
+            self.dtype_box.setCurrentIndex(idx)
+
+    def set_current_file(self, name: str) -> None:
+        self.file_label.setText(name)
 
 
 class TitleRowModel(QAbstractTableModel):
@@ -439,11 +523,32 @@ class TitleRowModel(QAbstractTableModel):
         self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
         return True
 
+    def set_titles(self, titles: list[str]) -> None:
+        cols = self.backend.shape[1]
+        titles = [str(x) for x in titles]
+
+        if len(titles) < cols:
+            titles = titles + [f"标题 {i}" for i in range(len(titles), cols)]
+        else:
+            titles = titles[:cols]
+
+        self.titles = titles
+        self.beginResetModel()
+        self.endResetModel()
+
+    def export_titles(self) -> list[str]:
+        return list(self.titles)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, backend: DataBackend) -> None:
         super().__init__()
         self.backend = backend
+
+        # Current opened file
+        self.current_file_path: str | None = None
+        self.current_file_name = "Untitled1.csv"
+        self.setAcceptDrops(True)
 
         self.setWindowTitle("PySide + NumPy Table Console")
         self.resize(1100, 760)
@@ -452,8 +557,14 @@ class MainWindow(QMainWindow):
         self.table_model = NumpyTableModel(backend)
         self.table_view = SelectionTableView()
         self.table_view.setFrameShape(QFrame.NoFrame)
-        self.table_view.horizontalHeader().hide()
-        self.table_view.setCornerButtonEnabled(False)
+        self.table_view.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.EditKeyPressed
+            | QAbstractItemView.SelectedClicked
+        )
+        self.table_view.paste_requested.connect(self._paste_into_table)
+        #self.table_view.horizontalHeader().hide()
+        #self.table_view.setCornerButtonEnabled(False)
         self.table_view.setModel(self.table_model)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -467,7 +578,8 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self.console)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        self.ribbon = RibbonToolbar()
+        self.ribbon = RibbonToolbar(list(self.backend.ALLOWED_TYPES.keys()))
+        self.ribbon.set_dtype(self.backend.current_dtype_name)
 
         # The part of the title line
         self.title_model = TitleRowModel(backend)
@@ -528,15 +640,105 @@ class MainWindow(QMainWindow):
 
         self._setup_connections()
         self._setup_menu()
+        self.ribbon.set_current_file(self.current_file_name)
         self._sync_title_view_geometry()
         self._sync_title_corner_geometry()
         self.update_status()
 
+    # Section: FILE I/O
+    def _read_title_comment(self, path: str) -> list[str] | None:
+        """
+        Reads a title comment from a text file.
+        Args:
+            path:
+
+        Returns:
+
+        """
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                first = f.readline().strip()
+        except Exception:
+            return None
+
+        if not first.startswith("#"):
+            return None
+
+        text = first[1:].strip()
+        if not text:
+            return None
+
+        parts = [p for p in re.split(r",+", text) if p]
+        return parts or None
+
+    def _set_current_file(self, path: str | None) -> None:
+        self.current_file_path = path
+        if path:
+            self.current_file_name = os.path.basename(path)
+        else:
+            self.current_file_name = "Untitled1.csv"
+        self.ribbon.set_current_file(self.current_file_name)
+
+    def _open_file(self, path: str | None = None) -> None:
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "打开文件",
+                "",
+                "Data Files (*.csv *.txt *.dat);;All Files (*)"
+            )
+        if not path:
+            return
+
+        titles = self._read_title_comment(path)
+        self.backend.load_csv(path)
+
+        if titles:
+            self.title_model.set_titles(titles)
+        else:
+            self.title_model._sync_columns()
+
+        self._set_current_file(path)
+        self._sync_title_view_geometry()
+
+    def _save_file(self) -> None:
+        if not self.current_file_path:
+            self._save_file_as()
+            return
+
+        self.backend.save_csv(
+            self.current_file_path,
+            title=self.title_model.export_titles()
+        )
+        self._set_current_file(self.current_file_path)
+
+    def _save_file_as(self) -> None:
+        default_name = self.current_file_name or "Untitled1.csv"
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "另存为",
+            default_name,
+            "CSV Files (*.csv);;Text Files (*.txt);;All Files (*)"
+        )
+        if not path:
+            return
+
+        if not os.path.splitext(path)[1]:
+            path += ".csv"
+
+        self.backend.save_csv(
+            path,
+            title=self.title_model.export_titles()
+        )
+        self._set_current_file(path)
+
+    # Section: launch setup
     def _setup_connections(self) -> None:
         sel_model = self.table_view.selectionModel()
         sel_model.selectionChanged.connect(self._on_view_selection_changed)
 
         self.table_view.space_pressed.connect(self._write_selection_to_console)
+        self.table_view.copy_requested.connect(self._copy_from_table)
 
         self.table_view.horizontalScrollBar().valueChanged.connect(
             self.title_view.horizontalScrollBar().setValue
@@ -546,8 +748,11 @@ class MainWindow(QMainWindow):
         )
         # sync the title left offset to match this offset of main data
         self.table_view.verticalHeader().geometriesChanged.connect(self._sync_title_corner_geometry)
+        # connect the change of backend data
         self.backend.data_changed.connect(self._sync_title_view_geometry)
         self.ribbon.font_size_changed.connect(self.set_table_font_size)
+        self.ribbon.dtype_selected.connect(self.backend.change_types)
+        self.backend.dtype_changed.connect(self.ribbon.set_dtype)
 
         self.backend.status_selection_changed.connect(self._on_status_selection_changed)
         self.backend.data_changed.connect(self.update_status)
@@ -557,10 +762,55 @@ class MainWindow(QMainWindow):
         self.table_view.viewport_resized.connect(self._on_table_viewport_resized)
 
     def _setup_menu(self) -> None:
-        menu = self.menuBar().addMenu("帮助")
-        action = QAction("说明", self)
-        action.triggered.connect(self.show_help)
-        menu.addAction(action)
+        file_menu = self.menuBar().addMenu("文件")
+
+        open_action = QAction("打开", self)
+        open_action.setShortcut("Ctrl+O")
+        open_action.triggered.connect(self._open_file)
+
+        save_action = QAction("保存", self)
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self._save_file)
+
+        save_as_action = QAction("另存为", self)
+        save_as_action.setShortcut("Ctrl+Shift+S")
+        save_as_action.triggered.connect(self._save_file_as)
+
+        file_menu.addAction(open_action)
+        file_menu.addAction(save_action)
+        file_menu.addAction(save_as_action)
+
+        help_menu = self.menuBar().addMenu("帮助")
+        help_action = QAction("说明", self)
+        help_action.triggered.connect(self.show_help)
+        help_menu.addAction(help_action)
+
+    def dragEnterEvent(self, event) -> None:
+        """
+        To support dragEnter files.
+        Args:
+            event:
+
+        Returns:
+
+        """
+        mime = event.mimeData()
+        if mime.hasUrls():
+            urls = mime.urls()
+            if urls and urls[0].isLocalFile():
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event) -> None:
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+
+        path = urls[0].toLocalFile()
+        if path:
+            self._open_file(path)
+            event.acceptProposedAction()
 
     def _sync_title_section_width(self, logical_index: int, _old: int, new: int) -> None:
         """
@@ -638,6 +888,123 @@ class MainWindow(QMainWindow):
         rows, cols = self.backend.shape
         sel = self.backend.current_status_rect()
         self.status.showMessage(f"shape=({rows}, {cols}) | selection={sel}")
+
+    def _parse_clipboard_table(self, text: str) -> np.ndarray:
+        """
+        Parse clipboard text into a 2D float ndarray.
+
+        Row separator:
+            any newline style supported by str.splitlines(), including
+            POSIX '\n' and Windows '\r\n'.
+
+        Column separator:
+            spaces, tabs, commas, or mixed runs of them.
+        """
+        if not text or not text.strip():
+            raise ValueError("剪贴板为空")
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            raise ValueError("剪贴板中没有可解析的数据")
+
+        values: list[list[float]] = []
+        width: int | None = None
+
+        for line in lines:
+            parts = [p for p in re.split(r"[,\t ]+", line.strip()) if p]
+            if not parts:
+                continue
+
+            row = [float(x) for x in parts]
+
+            if width is None:
+                width = len(row)
+            elif len(row) != width:
+                raise ValueError("各行列数不一致，无法解析为规则表格")
+
+            values.append(row)
+
+        if not values:
+            raise ValueError("未解析出任何数值")
+
+        return np.asarray(values, dtype=float)
+
+    def _copy_from_table(self) -> None:
+        indexes = self.table_view.selectionModel().selectedIndexes()
+        if not indexes:
+            return
+
+        cells = {(idx.row(), idx.column()) for idx in indexes}
+        rows = [r for r, _ in cells]
+        cols = [c for _, c in cells]
+        r0, r1 = min(rows), max(rows) + 1
+        c0, c1 = min(cols), max(cols) + 1
+
+        full = {(r, c) for r in range(r0, r1) for c in range(c0, c1)}
+        if cells != full:
+            self.show_warning("当前选区不是矩形，暂不支持复制为规则表格字符串")
+            return
+
+        arr = self.backend.data[r0:r1, c0:c1]
+
+        lines = []
+        for row in arr:
+            parts = []
+            for x in row:
+                if isinstance(x, (float, np.floating)):
+                    parts.append(f"{x:.8g}")
+                else:
+                    parts.append(str(x))
+            lines.append(" ".join(parts))
+
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _paste_into_table(self) -> None:
+        """
+        To trigger the signal that paste the data area.
+        Returns:
+
+        """
+        text = QApplication.clipboard().text()
+        try:
+            arr = self._parse_clipboard_table(text)
+        except Exception as e:
+            self.show_warning(f"剪贴板解析失败: {e}")
+            return
+
+        indexes = self.table_view.selectionModel().selectedIndexes()
+
+        if indexes:
+            cells = {(idx.row(), idx.column()) for idx in indexes}
+            rows_ = [r for r, _ in cells]
+            cols_ = [c for _, c in cells]
+            r0, r1 = min(rows_), max(rows_) + 1
+            c0, c1 = min(cols_), max(cols_) + 1
+
+            full = {(r, c) for r in range(r0, r1) for c in range(c0, c1)}
+
+            # 矩形选区
+            if cells == full:
+                self.backend.set_block_to_region(r0, r1, c0, c1, arr)
+                return
+
+            # 非矩形选区：只允许单值填充
+            if arr.shape == (1, 1):
+                self.backend.fill_block(cells, arr.item())
+                return
+
+            self.show_warning("非矩形选区只能粘贴单个值")
+            return
+
+        current = self.table_view.currentIndex()
+        if current.isValid():
+            start_row = current.row()
+            start_col = current.column()
+        else:
+            start_row = 0
+            start_col = 0
+
+        self.backend.set_block_at(start_row, start_col, arr)
 
     def _on_view_selection_changed(self, *_args) -> None:
         indexes = self.table_view.selectionModel().selectedIndexes()

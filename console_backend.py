@@ -38,6 +38,7 @@ SAFE_BUILTINS = {
     "map": builtins.map,
     "max": builtins.max,
     "min": builtins.min,
+    "object": builtins.object,
     "print": builtins.print,
     "range": builtins.range,
     "repr": builtins.repr,
@@ -49,6 +50,7 @@ SAFE_BUILTINS = {
     "str": builtins.str,
     "sum": builtins.sum,
     "tuple": builtins.tuple,
+    "type": builtins.type,
     "zip": builtins.zip,
 }
 

@@ -234,7 +234,7 @@ class DataBackend(QObject):
     def __init__(self, initial_data: Optional[np.ndarray] = None) -> None:
         super().__init__()
         if initial_data is None:
-            initial_data = np.zeros((500, 10), dtype=np.float64)
+            initial_data = np.full((500, 10), '', dtype=object)
 
         arr = DataArray(
             initial_data.shape,
@@ -248,13 +248,13 @@ class DataBackend(QObject):
         if arr.ndim != 2:
             raise ValueError("当前仅支持二维 ndarray")
 
-        self._data = arr.astype(np.float64, copy=False)
+        self._data = arr
         self._status_rect = RectSelection(0, 1, 0, 1)
         self._mouse_cells: set[tuple[int, int]] = set()
         self._preview_groups: list[set[tuple[int, int]]] = []
-        self._data_type_now = 'float64'
-        self._py_type = float  # record the type of python obj
-        self._np_type = np.float64  # record the type of numpy.ndarray
+        self._data_type_now = 'object'
+        self._py_type = (lambda x: x)  # record the type of python obj
+        self._np_type = object  # record the type of numpy.ndarray
         # here is the allowed types of the table. in the value tuple, the first is the converter/type of python build-in obj
         # and the second is the dtype of numpy.ndarray class.
         self.ALLOWED_TYPES = {

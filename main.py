@@ -6,6 +6,7 @@ from console_backend import ConsoleBackend
 from data_backend import DataBackend
 from display import MainWindow
 
+__version__ = 'v0.1'
 
 def main() -> int:
     app = QApplication(sys.argv)

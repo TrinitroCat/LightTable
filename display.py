@@ -416,11 +416,11 @@ class RibbonToolbar(QWidget):
         # Change dtype
         self.dtype_group = RibbonGroup("数据类型")
         self.dtype_label_caption = QLabel("当前:")
-        self.dtype_label = QLabel("float64")
+        self.dtype_label = QLabel("object")
         self.dtype_box = QComboBox()
         self.dtype_box.setEditable(False)
         self.dtype_box.addItems(dtype_names)
-        self.dtype_box.setCurrentText("float64")
+        self.dtype_box.setCurrentText("object")
 
         self.dtype_group.content_layout.addWidget(self.dtype_label_caption)
         self.dtype_group.content_layout.addWidget(self.dtype_label)
@@ -621,7 +621,7 @@ class MainWindow(QMainWindow):
         self.current_file_name = "Untitled1.csv"
         self.setAcceptDrops(True)
 
-        self.setWindowTitle("PySide + NumPy Table Console")
+        self.setWindowTitle("LightTable v0.1")
         self.resize(1100, 760)
 
         # sizes information
